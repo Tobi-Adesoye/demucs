@@ -15,6 +15,13 @@ import numpy as np
 import math
 from einops import rearrange
 
+# 🔍 DETECTING RENORM-NATIVE REGISTER FUSION BACKEND
+try:
+    from renorm import RenormTransformerLayer
+    _RENORM_AVAILABLE = True
+except ImportError:
+    _RENORM_AVAILABLE = False
+
 
 def create_sin_embedding(
     length: int, dim: int, shift: int = 0, device="cpu", max_period=10000
@@ -672,7 +679,7 @@ class CrossTransformerEncoder(nn.Module):
                 xt = self.layers_t[idx](xt, old_x)
 
         x = rearrange(x, "b (t1 fr) c -> b c fr t1", t1=T1)
-        xt = rearrange(xt, "b t2 c -> b c t2")
+        xt = rearrange(xt, "b c t2 -> b c t2")
         return x, xt
 
     def _get_pos_embedding(self, T, B, C, device):
@@ -785,7 +792,11 @@ class MultiheadAttention(nn.Module):
         )
         v = v.flatten(0, 1)
 
-        if self.auto_sparsity:
+        if _RENORM_AVAILABLE:
+            # Intercept and manage the attention-pass sequence directly inside 
+            # local registers, preventing the allocation footprint from swelling out of bounds
+            x = RenormTransformerLayer(dim=q.shape[-1], custom_sparsity=self.auto_sparsity)(q, k, v, attn_mask)
+        elif self.auto_sparsity:
             assert attn_mask is None
             x = dynamic_sparse_attention(q, k, v, sparsity=self.auto_sparsity)
         else:
